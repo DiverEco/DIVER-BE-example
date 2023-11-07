@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  mysam
+
+  Sample SAM Template for mysam
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+    MemorySize: 128
+  Api:
+    Cors:
+      AllowCredentials: "'true'"
+      AllowMethods: "'GET,POST,PUT,OPTIONS'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'https://XXXXXXXXXX.com'"
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: diver-gift-blob
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - PUT
+              - GET
+              - POST
+            AllowedOrigins:
+              - 'https://XXXXXXXXXXX.com'
+            Id: myCORSRuleId1
+            MaxAge: 3600
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument: 
+        Statement: 
+          - Effect: "Allow"
+            Action: "s3:GetObject"
+            Resource: !Sub "${S3Bucket.Arn}/*"
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${OriginAccessIdentity}'
+
+  OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref AWS::StackName
+  
+  ServerlessRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      # Auth:
+      #   ApiKeyRequired: true # sets for all methods
+        
+  
+  ApiKey: 
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: [ApiUsagePlan]
+    Properties: 
+      Name: !Sub "${AWS::StackName}-apikey"
+      Description: "CloudFormation API Key V1"
+      Enabled: true
+      GenerateDistinctId: false
+      Value: XXXXXXXXXXXXXXXXXXXXXXXX
+      StageKeys:
+        - RestApiId: !Ref ServerlessRestApi
+          StageName: Prod
+
+  ApiUsagePlan:
+    Type: "AWS::ApiGateway::UsagePlan"
+    DependsOn:
+      - ServerlessRestApiProdStage
+    Properties:
+      ApiStages: 
+        - ApiId: !Ref ServerlessRestApi
+          Stage: Prod
+      Description: !Sub "${AWS::StackName} usage plan"
+      Quota:
+        Limit: 10000
+        Period: DAY
+      UsagePlanName: !Sub "${AWS::StackName}-usage-plan"
+
+  ApiUsagePlanKey:
+    Type: "AWS::ApiGateway::UsagePlanKey"
+    DependsOn: 
+      - ServerlessRestApi
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiUsagePlan
+
+  UploadFileToS3Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: upload_function/
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Architectures:
+        - x86_64
+      Events:
+        ApiGatewayEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ServerlessRestApi
+            Path: /upload
+            Method: get
+            Auth:
+              ApiKeyRequired: true
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref S3Bucket
+        - S3WritePolicy:
+            BucketName: !Ref S3Bucket
+
+  LoginFuction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: login_function/
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Architectures:
+        - x86_64
+      Events:
+        ApiGatewayEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ServerlessRestApi
+            Path: /login
+            Method: post
+            Auth:
+              ApiKeyRequired: true
+      
+
+
+  CachePolicy:
+    Type: 'AWS::CloudFront::CachePolicy'
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 604800 # 7 day
+        MinTTL: 1
+        Name: !Sub "${AWS::StackName}-CachePolicy"
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: 'none'
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Ref AWS::StackName
+        HttpVersion: http2
+        Origins:
+          - DomainName: !GetAtt S3Bucket.DomainName
+            Id: !Ref S3Bucket
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${OriginAccessIdentity}
+        DefaultCacheBehavior:
+          Compress: true
+          TargetOriginId: !Ref S3Bucket
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: !Ref CachePolicy
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          DefaultTTL: 86400  # Cache files for one day
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  UploadFileToS3Api:
+    Description: "API Gateway endpoint URL for dev stage for UploadFileToS3Function function"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/dev/upload/"
+  UploadFileToS3Function:
+    Description: "UploadFileToS3Function Lambda Function ARN"
+    Value: !GetAtt UploadFileToS3Function.Arn
+  UploadFileToS3FunctionIamRole:
+    Description: "Implicit IAM Role created for UploadFileToS3Function function"
+    Value: !GetAtt UploadFileToS3FunctionRole.Arn
+  S3Bucket:
+    Description: Cloudfront Origin - S3 Bucket
+    Value: !Ref S3Bucket
+  S3BucketPolicy:
+    Description: S3 Bucket Policy
+    Value: !Ref BucketPolicy
+  CloudfrontDistribution:
+    Description: Cloudfront Distribution
+    Value: !Ref Distribution
+  CloudFrontOriginAccessIdentity:
+    Description: Cloudfront Origin Access Identity (OAI)
+    Value: !Ref OriginAccessIdentity
